@@ -22,6 +22,49 @@
 
 #define UART_BUFFER_SIZE   (1024)
 
+/* ----- VARIABLES GLOBALES ----- */
+
+QueueHandle_t color_queue;
+
+typedef struct {
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+} color_t;
+
+// Variables globales de color
+uint32_t RED = 255;
+uint32_t GREEN = 0;
+uint32_t BLUE = 255;
+
+// Puntero a la estructura led_strip_t
+led_strip_t *strip;
+
+
+/* ----- TASK A: Encender y apagar un LED RGB cada segundo ----- */
+
+void encender_led(void){
+    strip->set_pixel(strip, 0, RED, GREEN, BLUE);
+    strip->refresh(strip, 100);
+}
+
+void apagar_led(void){
+    strip->set_pixel(strip, 0, 0, 0, 0);
+    strip->refresh(strip, 100);
+}
+
+void blink_led(void *pvParameters) {
+    while (true) {
+        encender_led();
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        apagar_led();
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+    }
+}
+
+/* ----- TASK B: Recibir datos por UART y enviar a una QUEUE ----- */
+
 void init_uart(void) {
     uart_config_t uart_config = {
         .baud_rate = UART_BAUD_RATE,
@@ -35,122 +78,89 @@ void init_uart(void) {
     uart_driver_install(UART_PORT_NUM, UART_BUFFER_SIZE * 2, 0, 0, NULL, 0);
 }
 
-// Variable global para la queue
-QueueHandle_t color_queue;
-// TimerHandle_t timer;
-
-
-typedef struct {
-    uint8_t red;
-    uint8_t green;
-    uint8_t blue;
-} color_t;
-
-// Determinar el color según el caracter
-color_t color;
-
-// Variables globales de color
-uint32_t RED = 255;
-uint32_t GREEN = 0;
-uint32_t BLUE = 255;
-
-// Crear un puntero a la estructura led_strip_t
-led_strip_t *strip;
-
-void encender_led(void){
-    strip->set_pixel(strip, 0, RED, GREEN, BLUE);
-    strip->refresh(strip, 100);
-    // printf("LED encendido\n");
-
-}
-
-void apagar_led(void){
-    strip->set_pixel(strip, 0, 0, 0, 0);
-    strip->refresh(strip, 100);
-    // printf("LED apagado\n");
-
-}
-
-void blink_led(void *pvParameters) {
-    while (true) {
-        encender_led();
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-        apagar_led();
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-    }
-}
-
 void timer_callback(TimerHandle_t xTimer) {
-    printf("Timer callback\n");
-    color_t* timer_color = (color_t*) pvTimerGetTimerID(xTimer);
+    color_t* color = (color_t*) pvTimerGetTimerID(xTimer);
 
     // Enviar el color a la queue 
-     if (xQueueSend(color_queue, timer_color, portMAX_DELAY) != pdPASS) {
+     if (xQueueSend(color_queue, color, portMAX_DELAY) != pdPASS) {
                 printf("Error al enviar datos a la queue\n");
             }
-    printf("Color enviado a la queue\n");
-    free(timer_color);  // Liberar la memoria asignada al color del timer
+
+    printf("Color (%d,%d,%d) enviado a la queue\n", color->red, color->green, color->blue);
+    free(color);  // Liberar la memoria asignada al color del timer
+    
     // Eliminar el timer para evitar fugas de memoria
     xTimerDelete(xTimer, 0);
 }
 
-
-
 void uart_receive_task(void *pvParameters) {
-// Configure a temporary buffer for the incoming data
+    // Configurar un buffer temporal para los datos entrantes
     uint8_t *data = (uint8_t *) malloc(UART_BUFFER_SIZE);
+    if (data == NULL) {
+        printf("Failed to allocate memory for UART data buffer\n");
+        vTaskDelete(NULL);
+    }
+
     while (true) {
         int len = uart_read_bytes(UART_PORT_NUM, data, (UART_BUFFER_SIZE - 1), 20 / portTICK_PERIOD_MS);
         uart_write_bytes(UART_PORT_NUM, (const char *) data, len);
-        if (len) {
-            data[len] = '\0';
+        if (len > 0) {
+            data[len] = '\0'; // Asegurar que los datos formen una cadena válida
             printf("Recv str: %s\n", (char *) data);
 
             // Parsear el string recibido
             char *token = strtok((char *)data, ", ");
-            char color_char = token[0];  // Primer caracter es el color
-            token = strtok(NULL, ", ");
-            int delay_seconds = atoi(token); // Convertir la segunda parte en entero para el delay
-
-             
-            switch (color_char) {
-                case 'r':
-                    color = (color_t){.red = 255, .green = 0, .blue = 0};
-                    break;
-                case 'g':
-                    color = (color_t){.red = 0, .green = 255, .blue = 0};
-                    break;
-                case 'b':
-                    color = (color_t){.red = 0, .green = 0, .blue = 255};
-                    break;
-                default:
-                    printf("Color no reconocido\n");
-                    continue; // Si el color no es reconocido, ignorar este comando
+            if (token == NULL) {
+                printf("Dato no válido\n");
+                continue;
             }
+            char color_char = token[0];  // Primer caracter es el color
 
-            color_t *timer_color = malloc(sizeof(color_t));  // Crear memoria para el color del timer
-            if (timer_color == NULL) {
+            token = strtok(NULL, ", ");
+            if (token == NULL) {
+                printf("Dato no válido\n");
+                continue;
+            }
+            
+            int delay_seconds = atoi(token); // Convertir la segunda parte en entero para el delay
+            
+            // Determinar el color según el caracter
+            color_t *color = malloc(sizeof(color_t));  // Crear memoria para el color del timer
+            if (color == NULL) {
                 printf("Error al asignar memoria para el color del timer\n");
                 continue;
             }
 
-            *timer_color = color;  // Copia el color actual al espacio reservado
+            switch (color_char) {
+                case 'r':
+                    *color = (color_t){.red = 255, .green = 0, .blue = 0};
+                    break;
+                case 'g':
+                    *color = (color_t){.red = 0, .green = 255, .blue = 0};
+                    break;
+                case 'b':
+                    *color = (color_t){.red = 0, .green = 0, .blue = 255};
+                    break;
+                default:
+                    printf("Color no reconocido\n");
+                    free(color);
+                    continue; // Si el color no es reconocido, ignorar este comando
+            }
 
-          // Inicializar timer
-            TimerHandle_t timer = xTimerCreate("Timer", pdMS_TO_TICKS(delay_seconds * 1000), pdFALSE, (void*)timer_color, timer_callback);
+            // Inicializar timer
+            TimerHandle_t timer = xTimerCreate("Timer", pdMS_TO_TICKS(delay_seconds * 1000), pdFALSE, (void*)color, timer_callback);
             if (timer == NULL) {
                 printf("Error al crear el timer\n");
-                free(timer_color);
+                free(color);
+            } else {
+                // Enviar el color a la queue después del delay especificado
+                xTimerStart(timer, 0);
             }
-            // Enviar el color a la queue después del delay especificado
-            xTimerStart(timer, 0);
-
-
         }
     }
 }
 
+/* ----- TASK C: Actualizar el color de la tira de LED ----- */
 void update_color_task(void *pvParameters) {
     color_t received_color;
     while (true) {
@@ -165,24 +175,25 @@ void update_color_task(void *pvParameters) {
 
 void app_main(void)
 {
-    
-  // Inicializar el LED
+    // Inicializar el LED
     if (led_rgb_init(&strip) != ESP_OK) {
         printf("Error al inicializar la tira de LED\n"); // Si hay error se imprime por pantalla
+        return;
         }
 
-  // Inicializar UART
+    // Inicializar UART
     init_uart();
-    xTaskCreate(uart_receive_task, "uart_receive_task", TASK_STACK_SIZE, NULL, 10, NULL);
 
-  // Inicializar QUEUE
+    // Inicializar QUEUE
     color_queue = xQueueCreate(10, sizeof(color_t));
     if (color_queue == NULL) {
         printf("Error al crear la queue\n");
+        return;
     }
-    xTaskCreate(update_color_task, "update_color_task", TASK_STACK_SIZE, NULL, 10, NULL);
 
-    // Crear tarea de control de LED
-    xTaskCreate(blink_led, "Tarea1", TASK_STACK_SIZE, (void*)strip, 1, NULL);
+    // Crear TASKS
+    xTaskCreate(blink_led, "TaskA", TASK_STACK_SIZE, (void*)strip, 1, NULL);
+    xTaskCreate(uart_receive_task, "TaskB", TASK_STACK_SIZE, NULL, 10, NULL);
+    xTaskCreate(update_color_task, "TaskC", TASK_STACK_SIZE, NULL, 10, NULL);
   
 }
